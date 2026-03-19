@@ -34,8 +34,8 @@ def _save_config(data: dict):
 # Seed session state from persisted config on first load
 if "config_loaded" not in st.session_state:
     _cfg = _load_config()
-    if _cfg.get("anthropic_api_key"):
-        st.session_state["anthropic_api_key"] = _cfg["anthropic_api_key"]
+    if _cfg.get("openai_api_key"):
+        st.session_state["openai_api_key"] = _cfg["openai_api_key"]
     st.session_state["config_loaded"] = True
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -807,6 +807,105 @@ with st.sidebar:
     client_name = st.text_input("Client Name", value="", placeholder="Client name", key="client")
     report_title = st.text_input("Report Title", value="Campaign Performance Summary")
 
+    # ── Data Context Document (optional) ──────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**DATA CONTEXT** *(optional)*")
+    st.markdown(
+        "<p style='font-size:0.72rem;color:#8C9DB5;margin:-0.3rem 0 0.5rem 0;'>"
+        "Upload a document that describes how the dataset is structured — column definitions, "
+        "key values, business rules, KPI formulas, etc. This will be used to improve AI analysis "
+        "and data interpretation.</p>",
+        unsafe_allow_html=True,
+    )
+
+    _CTX_CACHE = os.path.join(os.path.dirname(__file__), ".data_cache", "data_context.md")
+
+    def _read_context_file(file_bytes, file_name):
+        """Parse uploaded context doc to plain text."""
+        ext = os.path.splitext(file_name)[1].lower()
+        text = ""
+        if ext in (".txt", ".md"):
+            text = file_bytes.decode("utf-8", errors="replace")
+        elif ext == ".csv":
+            text = file_bytes.decode("utf-8", errors="replace")
+        elif ext == ".docx":
+            try:
+                from markitdown import MarkItDown
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                    tmp.write(file_bytes)
+                    tmp_path = tmp.name
+                mid = MarkItDown()
+                result = mid.convert(tmp_path)
+                text = result.text_content
+                os.unlink(tmp_path)
+            except ImportError:
+                try:
+                    import docx
+                    from io import BytesIO as _BIO
+                    doc = docx.Document(_BIO(file_bytes))
+                    text = "\n".join(p.text for p in doc.paragraphs)
+                except ImportError:
+                    text = file_bytes.decode("utf-8", errors="replace")
+        elif ext == ".xlsx":
+            try:
+                _ctx_sheets = pd.read_excel(BytesIO(file_bytes), sheet_name=None)
+                parts = []
+                for sname, sdf in _ctx_sheets.items():
+                    parts.append(f"## Sheet: {sname}\n{sdf.to_markdown(index=False)}")
+                text = "\n\n".join(parts)
+            except Exception:
+                text = "(Could not parse Excel context file)"
+        else:
+            text = file_bytes.decode("utf-8", errors="replace")
+        return text.strip()
+
+    def _save_context(text):
+        os.makedirs(os.path.dirname(_CTX_CACHE), exist_ok=True)
+        with open(_CTX_CACHE, "w") as f:
+            f.write(text)
+
+    def _load_context():
+        if os.path.exists(_CTX_CACHE):
+            try:
+                with open(_CTX_CACHE) as f:
+                    return f.read().strip()
+            except Exception:
+                pass
+        return ""
+
+    # Load persisted context into session on first run
+    if "data_context" not in st.session_state:
+        st.session_state["data_context"] = _load_context()
+
+    ctx_file = st.file_uploader(
+        "Upload context document",
+        type=["txt", "md", "docx", "csv", "xlsx"],
+        help="Accepts .txt, .md, .docx, .csv, or .xlsx",
+        key="ctx_upload",
+    )
+    if ctx_file:
+        _ctx_text = _read_context_file(ctx_file.read(), ctx_file.name)
+        if _ctx_text:
+            st.session_state["data_context"] = _ctx_text
+            _save_context(_ctx_text)
+            st.success(f"Context loaded ({len(_ctx_text):,} chars)")
+
+    if st.session_state.get("data_context"):
+        with st.expander("View loaded context", expanded=False):
+            st.markdown(
+                f"<div style='font-size:0.78rem;color:#555;max-height:200px;overflow-y:auto;"
+                f"white-space:pre-wrap;font-family:monospace;'>"
+                f"{st.session_state['data_context'][:3000]}"
+                + ("…" if len(st.session_state["data_context"]) > 3000 else "")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+        if st.button("Clear context", key="clear_ctx"):
+            st.session_state["data_context"] = ""
+            if os.path.exists(_CTX_CACHE):
+                os.remove(_CTX_CACHE)
+            st.rerun()
 
     df_raw = None
     redshift_connected = False
@@ -1634,11 +1733,13 @@ else:
                 peak_spend_row = trend.loc[trend["Spend"].idxmax()]
                 peak_conv_row  = trend.loc[trend["Conversions"].idxmax()]
 
-            # Selector for secondary axis — right-aligned
+            # Selector for secondary axis — inline with section label
             _metric_options = ["Conversions", "Impressions", "CTR (%)", "CPM ($)"]
             if _sv:
                 _metric_options.append("Visits")
-            _, _sel_col = st.columns([5, 2])
+            _lbl_col, _sel_col = st.columns([5, 2])
+            with _lbl_col:
+                st.markdown("<p style='font-weight:700;color:#1A2B4A;margin-top:1.6rem;margin-bottom:0;font-size:0.95rem;'>Monthly Spend vs. Secondary Metric</p>", unsafe_allow_html=True)
             with _sel_col:
                 _secondary = st.selectbox(
                     "Secondary Metric",
@@ -1833,12 +1934,34 @@ else:
                 )
                 st.plotly_chart(fig_ch_trend, use_container_width=True)
 
-            # Hierarchical monthly summary table
-            if _hier_cols:
-                st.markdown("<p style='font-weight:700;color:#1A2B4A;margin-top:1.5rem;margin-bottom:0.4rem;font-size:0.95rem;'>Monthly Summary — LOB › Channel › Platform</p>", unsafe_allow_html=True)
-                mo_hier = _agg_metrics(dff, _hier_cols)
-                if not mo_hier.empty:
-                    st.markdown(_build_hier_html(mo_hier), unsafe_allow_html=True)
+            # Hierarchical monthly summary table with MoM % change
+            if _hier_cols and "Date" in dff.columns:
+                _mo_periods = dff["Date"].dt.to_period("M")
+                _mo_unique  = sorted(_mo_periods.unique(), reverse=True)
+                if len(_mo_unique) >= 2:
+                    _cur_mo  = _mo_unique[0]
+                    _prev_mo = _mo_unique[1]
+                    _cur_mo_df  = dff[_mo_periods == _cur_mo]
+                    _prev_mo_df = dff[_mo_periods == _prev_mo]
+                    _cur_mo_hier  = _agg_metrics(_cur_mo_df,  _hier_cols)
+                    _prev_mo_hier = _agg_metrics(_prev_mo_df, _hier_cols)
+                    _mo_label = f"{_cur_mo.strftime('%b %Y')} vs. {_prev_mo.strftime('%b %Y')}"
+                    st.markdown(
+                        f"<p style='font-weight:700;color:#1A2B4A;margin-top:1.5rem;margin-bottom:0.4rem;font-size:0.95rem;'>"
+                        f"Monthly Summary — LOB › Channel › Platform"
+                        f"<span style='font-weight:400;color:#888;font-size:0.82rem;margin-left:0.75rem;'>{_mo_label}</span></p>",
+                        unsafe_allow_html=True,
+                    )
+                    if not _cur_mo_hier.empty:
+                        st.markdown(
+                            _build_hier_html(_cur_mo_hier, _prev_mo_hier if not _prev_mo_hier.empty else None),
+                            unsafe_allow_html=True,
+                        )
+                elif len(_mo_unique) == 1:
+                    st.markdown("<p style='font-weight:700;color:#1A2B4A;margin-top:1.5rem;margin-bottom:0.4rem;font-size:0.95rem;'>Monthly Summary — LOB › Channel › Platform</p>", unsafe_allow_html=True)
+                    mo_hier = _agg_metrics(dff, _hier_cols)
+                    if not mo_hier.empty:
+                        st.markdown(_build_hier_html(mo_hier), unsafe_allow_html=True)
         else:
             st.info("No 'Date' column found for trend analysis.")
 
@@ -1922,16 +2045,16 @@ else:
 
         key_col, _ = st.columns([2, 3])
         with key_col:
-            anthropic_key = st.text_input(
-                "Anthropic API Key",
+            openai_key = st.text_input(
+                "OpenAI API Key",
                 type="password",
-                placeholder="sk-ant-...",
-                help="Get yours at console.anthropic.com",
+                placeholder="sk-...",
+                help="Get yours at platform.openai.com/api-keys",
                 key="api_key_input",
             )
-            if anthropic_key:
-                st.session_state["anthropic_api_key"] = anthropic_key
-                _save_config({"anthropic_api_key": anthropic_key})
+            if openai_key:
+                st.session_state["openai_api_key"] = openai_key
+                _save_config({"openai_api_key": openai_key})
 
         # Example prompts
         examples = [
@@ -1966,7 +2089,22 @@ else:
             numeric_cols = dff.select_dtypes(include="number").columns.tolist()
             cat_cols = [c for c in dff.columns if c not in numeric_cols]
 
-            system_prompt = """You are a data analyst writing Python code for a Streamlit app.
+            # Inject data context document if available
+            _data_ctx = st.session_state.get("data_context", "")
+            _ctx_block = ""
+            if _data_ctx:
+                # Trim to keep prompt manageable
+                _ctx_trimmed = _data_ctx[:4000]
+                _ctx_block = f"""
+
+IMPORTANT — Data Context Document (provided by the user to explain how this dataset is structured):
+---
+{_ctx_trimmed}
+---
+Use this context to understand column meanings, key values, business rules, and KPI definitions.
+When the context defines how a metric should be calculated, follow that definition exactly."""
+
+            system_prompt = f"""You are a data analyst writing Python code for a Streamlit app.
 You will be given a pandas DataFrame called `dff` and a plain-English question.
 Return ONLY valid Python code — no markdown, no explanation, no code fences.
 
@@ -1981,7 +2119,7 @@ The code must:
    Keep the chart clean and readable. Height 380.
 3. Do NOT call st.plotly_chart() or st.dataframe() — just define fig and result_df.
 4. Do NOT import anything — pandas as pd, plotly.express as px, and plotly.graph_objects as go are already available.
-5. If the question cannot be answered from the data, set fig=None and result_df=None."""
+5. If the question cannot be answered from the data, set fig=None and result_df=None.{_ctx_block}"""
 
             user_prompt = f"""DataFrame columns: {col_list}
 Numeric columns: {', '.join(numeric_cols)}
@@ -1993,23 +2131,26 @@ Question: {query}"""
 
             _progress = st.progress(0, text="Checking credentials…")
             try:
-                    import anthropic, os
-                    api_key = st.session_state.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
+                    from openai import OpenAI
+                    import os
+                    api_key = st.session_state.get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
                     if not api_key:
                         _progress.empty()
-                        st.error("Enter your Anthropic API key above to use the AI Sandbox.")
+                        st.error("Enter your OpenAI API key above to use the AI Sandbox.")
                         st.stop()
 
                     _progress.progress(15, text="Sending query to AI…")
-                    client_ai = anthropic.Anthropic(api_key=api_key)
-                    response = client_ai.messages.create(
-                        model="claude-sonnet-4-6",
+                    client_ai = OpenAI(api_key=api_key)
+                    response = client_ai.chat.completions.create(
+                        model="gpt-4o",
                         max_tokens=4096,
-                        system=system_prompt,
-                        messages=[{"role": "user", "content": user_prompt}],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
                     )
                     _progress.progress(70, text="Generating visualization…")
-                    code = response.content[0].text.strip()
+                    code = response.choices[0].message.content.strip()
                     # Strip accidental fences
                     if code.startswith("```"):
                         code = "\n".join(code.split("\n")[1:])
@@ -2039,7 +2180,7 @@ Question: {query}"""
 
             except ImportError:
                     _progress.empty()
-                    st.error("Anthropic SDK not installed. Run: pip install anthropic")
+                    st.error("OpenAI SDK not installed. Run: pip install openai")
             except Exception as e:
                     _progress.empty()
                     st.error(f"Error running query: {e}")

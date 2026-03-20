@@ -166,7 +166,7 @@ If your source file uses different names, update the `rename_map` dictionary nea
 
 This app can be used **alongside or instead of** the existing CLI pipeline:
 
-- **Same data source** — Both read from `CM_All_Consolidated.xlsx` (or equivalent). The app's column mapping covers the same fields as `config/field_map.yaml`.
+- **Same data source** — Both read from `all_Consolidated.xlsx` (or equivalent). The app's column mapping covers the same fields as `config/field_map.yaml`.
 - **Complementary outputs** — The CLI generates scheduled static reports; this app is for ad-hoc exploration and on-demand decks.
 - **Shared KPI logic** — Both calculate Spend, Impressions, Clicks, Conversions, CTR, CPM, CPA, CPC, and Site Visits. Formulas are equivalent.
 - **No shared code dependencies** — The app is self-contained in a single file. It can be deployed independently.
